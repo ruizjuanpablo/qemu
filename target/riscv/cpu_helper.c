@@ -41,10 +41,8 @@ static int riscv_cpu_local_irq_pending(CPURISCVState *env)
 
     target_ulong mstatus_mie = get_field(env->mstatus, MSTATUS_MIE);
     target_ulong mstatus_sie = get_field(env->mstatus, MSTATUS_SIE);
-    target_ulong hs_mstatus_sie = get_field(env->mstatus_hs, MSTATUS_SIE);
 
-    target_ulong pending = env->mip & env->mie &
-                               ~(MIP_VSSIP | MIP_VSTIP | MIP_VSEIP);
+    target_ulong pending = env->mip & env->mie;
     target_ulong vspending = (env->mip & env->mie &
                               (MIP_VSSIP | MIP_VSTIP | MIP_VSEIP));
 
@@ -52,11 +50,9 @@ static int riscv_cpu_local_irq_pending(CPURISCVState *env)
                           (env->priv == PRV_M && mstatus_mie);
     target_ulong sie    = env->priv < PRV_S ||
                           (env->priv == PRV_S && mstatus_sie);
-    target_ulong hs_sie = env->priv < PRV_S ||
-                          (env->priv == PRV_S && hs_mstatus_sie);
 
     if (riscv_cpu_virt_enabled(env)) {
-        target_ulong pending_hs_irq = pending & -hs_sie;
+        target_ulong pending_hs_irq = pending & ~env->hideleg;
 
         if (pending_hs_irq) {
             riscv_cpu_set_force_hs_excep(env, FORCE_HS_EXCEP);
