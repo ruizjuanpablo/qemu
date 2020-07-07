@@ -403,8 +403,11 @@ static const target_ulong sstatus_v1_10_mask = SSTATUS_SIE | SSTATUS_SPIE |
     SSTATUS_UIE | SSTATUS_UPIE | SSTATUS_SPP | SSTATUS_FS | SSTATUS_XS |
     SSTATUS_SUM | SSTATUS_MXR | SSTATUS_SD;
 static const target_ulong sip_writable_mask = SIP_SSIP | MIP_USIP | MIP_UEIP;
-static const target_ulong hip_writable_mask = MIP_VSSIP | MIP_VSTIP | MIP_VSEIP;
+static const target_ulong hip_readable_mask = MIP_VSSIP | MIP_VSTIP | MIP_VSEIP;
+static const target_ulong hip_writable_mask = MIP_VSSIP;
+static const target_ulong hvip_writable_mask = MIP_VSSIP | MIP_VSTIP | MIP_VSEIP;
 static const target_ulong vsip_writable_mask = MIP_VSSIP;
+static const target_ulong vsip_readable_mask = MIP_VSSIP | MIP_VSTIP | MIP_VSEIP;
 
 #if defined(TARGET_RISCV32)
 static const char valid_vm_1_10[16] = {
@@ -703,6 +706,7 @@ static int rmw_mip(CPURISCVState *env, int csrno, target_ulong *ret_value,
     uint32_t old_mip;
 
     if (mask) {
+        if(csrno != CSR_HVIP) new_value &= ~(MIP_VSEIP | MIP_VSTIP);
         old_mip = riscv_cpu_update_mip(cpu, mask, (new_value & mask));
     } else {
         old_mip = env->mip;
@@ -730,25 +734,26 @@ static int write_sstatus(CPURISCVState *env, int csrno, target_ulong val)
     return write_mstatus(env, CSR_MSTATUS, newval);
 }
 
+static int read_vsie(CPURISCVState *env, int csrno, target_ulong *val);
 static int read_sie(CPURISCVState *env, int csrno, target_ulong *val)
 {
     if (riscv_cpu_virt_enabled(env)) {
         /* Tell the guest the VS bits, shifted to the S bit locations */
-        *val = (env->mie & env->mideleg & VS_MODE_INTERRUPTS) >> 1;
+        return read_vsie(env, csrno, val);
     } else {
         *val = env->mie & env->mideleg;
     }
     return 0;
 }
 
+static int write_vsie(CPURISCVState *env, int csrno, target_ulong val);
 static int write_sie(CPURISCVState *env, int csrno, target_ulong val)
 {
     target_ulong newval;
 
     if (riscv_cpu_virt_enabled(env)) {
         /* Shift the guests S bits to VS */
-        newval = (env->mie & ~VS_MODE_INTERRUPTS) |
-                 ((val << 1) & VS_MODE_INTERRUPTS);
+        return write_vsie(env, csrno, val << 1);
     } else {
         newval = (env->mie & ~S_MODE_INTERRUPTS) | (val & S_MODE_INTERRUPTS);
     }
@@ -834,6 +839,8 @@ static int write_sbadaddr(CPURISCVState *env, int csrno, target_ulong val)
     return 0;
 }
 
+static int rmw_vsip(CPURISCVState *env, int csrno, target_ulong *ret_value,
+                    target_ulong new_value, target_ulong write_mask);
 static int rmw_sip(CPURISCVState *env, int csrno, target_ulong *ret_value,
                    target_ulong new_value, target_ulong write_mask)
 {
@@ -841,16 +848,13 @@ static int rmw_sip(CPURISCVState *env, int csrno, target_ulong *ret_value,
 
     if (riscv_cpu_virt_enabled(env)) {
         /* Shift the new values to line up with the VS bits */
-        ret = rmw_mip(env, CSR_MSTATUS, ret_value, new_value << 1,
-                      (write_mask & sip_writable_mask) << 1 & env->mideleg);
-        ret &= vsip_writable_mask;
-        ret >>= 1;
+        ret = rmw_vsip(env, csrno, ret_value, new_value, write_mask);
     } else {
         ret = rmw_mip(env, CSR_MSTATUS, ret_value, new_value,
                       write_mask & env->mideleg & sip_writable_mask);
     }
 
-    *ret_value &= env->mideleg;
+    *ret_value &= env->mideleg & ~VS_MODE_INTERRUPTS;
     return ret;
 }
 
@@ -945,10 +949,10 @@ static int write_hideleg(CPURISCVState *env, int csrno, target_ulong val)
 static int rmw_hvip(CPURISCVState *env, int csrno, target_ulong *ret_value,
                    target_ulong new_value, target_ulong write_mask)
 {
-    int ret = rmw_mip(env, 0, ret_value, new_value,
-                      write_mask & hip_writable_mask);
+    int ret = rmw_mip(env, CSR_HVIP, ret_value, new_value,
+                      write_mask & hvip_writable_mask);
 
-    *ret_value &= hip_writable_mask;
+    *ret_value &= hvip_writable_mask;
 
     return ret;
 }
@@ -959,7 +963,7 @@ static int rmw_hip(CPURISCVState *env, int csrno, target_ulong *ret_value,
     int ret = rmw_mip(env, 0, ret_value, new_value,
                       write_mask & hip_writable_mask);
 
-    *ret_value &= hip_writable_mask;
+    *ret_value &= hip_readable_mask;
 
     return ret;
 }
@@ -1114,20 +1118,21 @@ static int write_vsstatus(CPURISCVState *env, int csrno, target_ulong val)
 static int rmw_vsip(CPURISCVState *env, int csrno, target_ulong *ret_value,
                     target_ulong new_value, target_ulong write_mask)
 {
-    int ret = rmw_mip(env, 0, ret_value, new_value,
-                      write_mask & env->mideleg & vsip_writable_mask);
+    int ret = rmw_mip(env, 0, ret_value, new_value << 1,
+                      write_mask & env->hideleg & vsip_writable_mask);
+    *ret_value = (*ret_value & env->hideleg & vsip_readable_mask) >> 1;
     return ret;
 }
 
 static int read_vsie(CPURISCVState *env, int csrno, target_ulong *val)
 {
-    *val = env->mie & env->mideleg & VS_MODE_INTERRUPTS;
+    *val = (env->mie & env->hideleg & VS_MODE_INTERRUPTS) >> 1;
     return 0;
 }
 
 static int write_vsie(CPURISCVState *env, int csrno, target_ulong val)
-{
-    target_ulong newval = (env->mie & ~env->mideleg) | (val & env->mideleg & MIP_VSSIP);
+{   
+    target_ulong newval = (env->mie & ~env->hideleg) | (val & env->hideleg);
     return write_mie(env, CSR_MIE, newval);
 }
 
